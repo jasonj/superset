@@ -70,6 +70,51 @@ class ChartStandaloneMode(Enum):
     SHOW_NAV = 0
 
 
+playrightInstance = None
+playwrightBrowser = None
+playwrightContextInstanceCount = 0
+
+def get_playwright_browser_context(browser_args, context_args, default_timeout, user, recreate=False):
+    global playrightInstance
+    global playwrightBrowser
+    global playwrightContextInstanceCount
+
+    if recreate:
+        try:
+            logger.info("Stopping playwright instance")
+            playrightInstance.stop()
+        except Exception as e:
+            logger.exception("Failed to stop playwright instance", exc_info=e)
+            pass
+
+        playrightInstance = None
+
+        try:
+            logger.info("Closing playwright browser")
+            playwrightBrowser.close()
+        except Exception as e:
+            logger.exception("Failed to close playwright browser", exc_info=e)
+            pass
+
+        playwrightBrowser = None
+
+    if playrightInstance is None:
+        logger.info("Starting playwright instance")
+        playrightInstance = sync_playwright().start()
+    
+    if playwrightBrowser is None:
+        logger.info("Launching playwright browser")
+        chromium = playrightInstance.chromium
+        playwrightBrowser = chromium.launch_persistent_context('', args=browser_args, **context_args)
+        playwrightBrowser.set_default_timeout(default_timeout)
+        WebDriverPlaywright.auth(user, playwrightBrowser)
+
+    # will use to add recycling of playwright browser context later
+    playwrightContextInstanceCount += 1
+    logger.info(f"Playwright context instance count: {playwrightContextInstanceCount}")
+
+    return playwrightBrowser
+
 # pylint: disable=too-few-public-methods
 class WebDriverProxy(ABC):
     def __init__(self, driver_type: str, window: WindowSize | None = None):
@@ -139,109 +184,128 @@ class WebDriverPlaywright(WebDriverProxy):
     def get_screenshot(  # pylint: disable=too-many-locals, too-many-statements  # noqa: C901
         self, url: str, element_name: str, user: User
     ) -> bytes | None:
-        with sync_playwright() as playwright:
-            browser_args = current_app.config["WEBDRIVER_OPTION_ARGS"]
-            browser = playwright.chromium.launch(args=browser_args)
-            pixel_density = current_app.config["WEBDRIVER_WINDOW"].get(
-                "pixel_density", 1
+        #with sync_playwright() as playwright:
+
+        browser_args = current_app.config["WEBDRIVER_OPTION_ARGS"]
+        # browser = playwright.chromium.launch(args=browser_args)
+        
+        pixel_density = current_app.config["WEBDRIVER_WINDOW"].get(
+            "pixel_density", 1
+        )
+        #context = browser.new_context(
+        #    bypass_csp=True,
+        #    viewport={
+        #        "height": self._window[1],
+        #        "width": self._window[0],
+        #    },
+        #    device_scale_factor=pixel_density,
+        #)
+
+        context_args = {
+            "bypass_csp": True,
+            "viewport": {
+                "height": self._window[1],
+                "width": self._window[0],
+            },
+            "device_scale_factor": pixel_density,
+        }
+
+        try:
+            context = get_playwright_browser_context(browser_args, context_args, current_app.config["SCREENSHOT_PLAYWRIGHT_DEFAULT_TIMEOUT"], user)
+        except Exception as e:
+            logger.exception("Failed to create playwright browser context, recreating", exc_info=e)
+            context = get_playwright_browser_context(browser_args, context_args, current_app.config["SCREENSHOT_PLAYWRIGHT_DEFAULT_TIMEOUT"], user, recreate=True)
+
+        #context.set_default_timeout(
+        #    current_app.config["SCREENSHOT_PLAYWRIGHT_DEFAULT_TIMEOUT"]
+        #)
+
+        #self.auth(user, context)
+        page = context.new_page()
+        try:
+            page.goto(
+                url,
+                wait_until=current_app.config["SCREENSHOT_PLAYWRIGHT_WAIT_EVENT"],
             )
-            context = browser.new_context(
-                bypass_csp=True,
-                viewport={
-                    "height": self._window[1],
-                    "width": self._window[0],
-                },
-                device_scale_factor=pixel_density,
+        except PlaywrightTimeout:
+            logger.exception(
+                "Web event %s not detected. Page %s might not have been fully loaded",  # noqa: E501
+                current_app.config["SCREENSHOT_PLAYWRIGHT_WAIT_EVENT"],
+                url,
             )
-            context.set_default_timeout(
-                current_app.config["SCREENSHOT_PLAYWRIGHT_DEFAULT_TIMEOUT"]
-            )
-            self.auth(user, context)
-            page = context.new_page()
+
+        img: bytes | None = None
+        selenium_headstart = current_app.config["SCREENSHOT_SELENIUM_HEADSTART"]
+        logger.debug("Sleeping for %i seconds", selenium_headstart)
+        page.wait_for_timeout(selenium_headstart * 1000)
+        element: Locator
+        try:
             try:
-                page.goto(
-                    url,
-                    wait_until=current_app.config["SCREENSHOT_PLAYWRIGHT_WAIT_EVENT"],
+                # page didn't load
+                logger.debug(
+                    "Wait for the presence of %s at url: %s", element_name, url
                 )
+                element = page.locator(f".{element_name}")
+                element.wait_for()
+            except PlaywrightTimeout:
+                logger.exception("Timed out requesting url %s", url)
+                raise
+
+            try:
+                # chart containers didn't render
+                logger.debug("Wait for chart containers to draw at url: %s", url)
+                slice_container_locator = page.locator(".chart-container")
+                for slice_container_elem in slice_container_locator.all():
+                    slice_container_elem.wait_for()
             except PlaywrightTimeout:
                 logger.exception(
-                    "Web event %s not detected. Page %s might not have been fully loaded",  # noqa: E501
-                    current_app.config["SCREENSHOT_PLAYWRIGHT_WAIT_EVENT"],
+                    "Timed out waiting for chart containers to draw at url %s",
                     url,
                 )
-
-            img: bytes | None = None
-            selenium_headstart = current_app.config["SCREENSHOT_SELENIUM_HEADSTART"]
-            logger.debug("Sleeping for %i seconds", selenium_headstart)
-            page.wait_for_timeout(selenium_headstart * 1000)
-            element: Locator
+                raise
             try:
-                try:
-                    # page didn't load
-                    logger.debug(
-                        "Wait for the presence of %s at url: %s", element_name, url
-                    )
-                    element = page.locator(f".{element_name}")
-                    element.wait_for()
-                except PlaywrightTimeout:
-                    logger.exception("Timed out requesting url %s", url)
-                    raise
+                # charts took too long to load
+                logger.debug(
+                    "Wait for loading element of charts to be gone at url: %s", url
+                )
+                for loading_element in page.locator(".loading").all():
+                    loading_element.wait_for(state="detached")
+            except PlaywrightTimeout:
+                logger.exception(
+                    "Timed out waiting for charts to load at url %s", url
+                )
+                raise
 
-                try:
-                    # chart containers didn't render
-                    logger.debug("Wait for chart containers to draw at url: %s", url)
-                    slice_container_locator = page.locator(".chart-container")
-                    for slice_container_elem in slice_container_locator.all():
-                        slice_container_elem.wait_for()
-                except PlaywrightTimeout:
-                    logger.exception(
-                        "Timed out waiting for chart containers to draw at url %s",
+            selenium_animation_wait = current_app.config[
+                "SCREENSHOT_SELENIUM_ANIMATION_WAIT"
+            ]
+            logger.debug(
+                "Wait %i seconds for chart animation", selenium_animation_wait
+            )
+            page.wait_for_timeout(selenium_animation_wait * 1000)
+            logger.debug(
+                "Taking a PNG screenshot of url %s as user %s",
+                url,
+                user.username,
+            )
+            if current_app.config["SCREENSHOT_REPLACE_UNEXPECTED_ERRORS"]:
+                unexpected_errors = WebDriverPlaywright.find_unexpected_errors(page)
+                if unexpected_errors:
+                    logger.warning(
+                        "%i errors found in the screenshot. URL: %s. Errors are: %s",  # noqa: E501
+                        len(unexpected_errors),
                         url,
+                        unexpected_errors,
                     )
-                    raise
-                try:
-                    # charts took too long to load
-                    logger.debug(
-                        "Wait for loading element of charts to be gone at url: %s", url
-                    )
-                    for loading_element in page.locator(".loading").all():
-                        loading_element.wait_for(state="detached")
-                except PlaywrightTimeout:
-                    logger.exception(
-                        "Timed out waiting for charts to load at url %s", url
-                    )
-                    raise
-
-                selenium_animation_wait = current_app.config[
-                    "SCREENSHOT_SELENIUM_ANIMATION_WAIT"
-                ]
-                logger.debug(
-                    "Wait %i seconds for chart animation", selenium_animation_wait
-                )
-                page.wait_for_timeout(selenium_animation_wait * 1000)
-                logger.debug(
-                    "Taking a PNG screenshot of url %s as user %s",
-                    url,
-                    user.username,
-                )
-                if current_app.config["SCREENSHOT_REPLACE_UNEXPECTED_ERRORS"]:
-                    unexpected_errors = WebDriverPlaywright.find_unexpected_errors(page)
-                    if unexpected_errors:
-                        logger.warning(
-                            "%i errors found in the screenshot. URL: %s. Errors are: %s",  # noqa: E501
-                            len(unexpected_errors),
-                            url,
-                            unexpected_errors,
-                        )
-                img = element.screenshot()
-            except PlaywrightTimeout:
-                # raise again for the finally block, but handled above
-                pass
-            except PlaywrightError:
-                logger.exception(
-                    "Encountered an unexpected error when requesting url %s", url
-                )
-            return img
+            img = element.screenshot()
+        except PlaywrightTimeout:
+            # raise again for the finally block, but handled above
+            pass
+        except PlaywrightError:
+            logger.exception(
+                "Encountered an unexpected error when requesting url %s", url
+            )
+        return img
 
 
 class WebDriverSelenium(WebDriverProxy):

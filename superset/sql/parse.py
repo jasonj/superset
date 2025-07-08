@@ -26,16 +26,25 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Generic, TYPE_CHECKING, TypeVar
 
-import sqlglot
+import sqlglot  # pylint: disable=disallowed-sql-import
 from jinja2 import nodes, Template
-from sqlglot import exp
-from sqlglot.dialects.dialect import Dialect, Dialects
-from sqlglot.errors import ParseError
-from sqlglot.optimizer.pushdown_predicates import pushdown_predicates
-from sqlglot.optimizer.scope import Scope, ScopeType, traverse_scope
+from sqlglot import exp  # pylint: disable=disallowed-sql-import
+from sqlglot.dialects.dialect import (  # pylint: disable=disallowed-sql-import
+    Dialect,
+    Dialects,
+)
+from sqlglot.errors import ParseError  # pylint: disable=disallowed-sql-import
+from sqlglot.optimizer.pushdown_predicates import (  # pylint: disable=disallowed-sql-import
+    pushdown_predicates,
+)
+from sqlglot.optimizer.scope import (  # pylint: disable=disallowed-sql-import
+    Scope,
+    ScopeType,
+    traverse_scope,
+)
 
 from superset.exceptions import QueryClauseValidationException, SupersetParseError
-from superset.sql.dialects.firebolt import Firebolt
+from superset.sql.dialects import Dremio, Firebolt
 
 if TYPE_CHECKING:
     from superset.models.core import Database
@@ -58,7 +67,8 @@ SQLGLOT_DIALECTS = {
     # "databend": ???
     "databricks": Dialects.DATABRICKS,
     # "db2": ???
-    # "dremio": ???
+    # "denodo": ???
+    "dremio": Dremio,
     "drill": Dialects.DRILL,
     "druid": Dialects.DRUID,
     "duckdb": Dialects.DUCKDB,
@@ -72,21 +82,24 @@ SQLGLOT_DIALECTS = {
     "hive": Dialects.HIVE,
     # "ibmi": ???
     # "impala": ???
-    # "kustokql": ???
+    # "kustosql": ???
     # "kylin": ???
+    "mariadb": Dialects.MYSQL,
+    "motherduck": Dialects.DUCKDB,
     "mssql": Dialects.TSQL,
     "mysql": Dialects.MYSQL,
     "netezza": Dialects.POSTGRES,
+    "oceanbase": Dialects.MYSQL,
     # "ocient": ???
     # "odelasticsearch": ???
     "oracle": Dialects.ORACLE,
-    # "pinot": ???
+    "parseable": Dialects.POSTGRES,
+    "pinot": Dialects.MYSQL,
     "postgresql": Dialects.POSTGRES,
     "presto": Dialects.PRESTO,
     "pydoris": Dialects.DORIS,
     "redshift": Dialects.REDSHIFT,
     "risingwave": Dialects.RISINGWAVE,
-    # "rockset": ???
     "shillelagh": Dialects.SQLITE,
     "singlestore": Dialects.MYSQL,
     "snowflake": Dialects.SNOWFLAKE,
@@ -95,6 +108,7 @@ SQLGLOT_DIALECTS = {
     "sqlite": Dialects.SQLITE,
     "starrocks": Dialects.STARROCKS,
     "superset": Dialects.SQLITE,
+    # "taosws": ???
     "teradatasql": Dialects.TERADATA,
     "trino": Dialects.TRINO,
     "vertica": Dialects.POSTGRES,
